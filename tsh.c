@@ -169,9 +169,27 @@ int main(int argc, char **argv) {
  *       (and its helpers) should avoid exiting on error.  This is not to say
  *       they shouldn't detect and print (or otherwise handle) errors!
  */
+bool eval_builtin_command(const struct cmdline_tokens *token) {
+    dbg_requires(token->builtin);
+    if (token->builtin == BUILTIN_QUIT) {
+        exit(0);
+    }
+    return 1;
+}
+
+/**
+ * @brief <What does eval do?>
+ *
+ * TODO: Delete this comment and replace it with your own.
+ *
+ * NOTE: The shell is supposed to be a long-running process, so this function
+ *       (and its helpers) should avoid exiting on error.  This is not to say
+ *       they shouldn't detect and print (or otherwise handle) errors!
+ */
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
+    pid_t pid;
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -180,6 +198,19 @@ void eval(const char *cmdline) {
         return;
     }
 
+    // turn this into helper int builtin_command(char **argv)
+    if (token.builtin != BUILTIN_NONE) {
+        eval_builtin_command(&token);
+    } else {
+        char **argv = token.argv;
+        if ((pid = fork() == 0)) {
+            if (execve(argv[0], argv, environ) < 0) {
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        }
+    }
+    fflush(stdout);
     // TODO: Implement commands here.
 }
 
