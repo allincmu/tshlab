@@ -221,7 +221,7 @@ void eval(const char *cmdline) {
                                                    // correct fix
         } else {
             // block signals
-            __sigset_t mask, prev_mask;
+            __sigset_t mask, prev_mask; 
             sigemptyset(&mask);
             sigaddset(&mask, SIGINT);
             sigaddset(&mask, SIGCHLD);
