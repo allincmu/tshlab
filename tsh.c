@@ -211,7 +211,13 @@ void eval(const char *cmdline) {
     struct cmdline_tokens token;
     pid_t pid;
     jid_t jid;
-    __sigset_t mask, prev_mask;
+    __sigset_t full_mask, sigchld_mask, prev_mask;
+
+    sigemptyset(&full_mask);
+    sigemptyset(&sigchld_mask);
+
+    sigfillset(&full_mask);
+    sigaddset(&sigchld_mask, SIGCHLD);
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -225,13 +231,16 @@ void eval(const char *cmdline) {
         eval_builtin_command(&token);
     } else { // evaluate builtin
 
+        sigprocmask(SIG_BLOCK, &sigchld_mask, &prev_mask);
         char **argv = token.argv;
         if ((pid = fork()) == 0) { // child runs job
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             if (execve(argv[0], argv, environ) < 0) {
                 sio_eprintf("%s: Command not found.\n", argv[0]);
                 exit(0);
             }
         }
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
         // sigemptyset(&mask);
         // sigaddset(&mask, SIGCHLD);
@@ -241,33 +250,17 @@ void eval(const char *cmdline) {
 
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
-            int status;
-            if (waitpid(pid, &status, 0) < 0)
-                sio_eprintf(
-                    "waitfg: waitpid error\n"); /** TODO: originally unix_error
-                                                 * not sure if this is
-                                                 * the correct fix
-                                                 */
-
+            // pid = 0;
+            // while (!pid) {
+            //     sigsuspend(&prev_mask);
+            // }
         } else {
-
             // block signals before adding to job list
-
-            sigemptyset(&mask);
-            sigaddset(&mask, SIGINT);
-            sigaddset(&mask, SIGCHLD);
-            sigaddset(&mask, SIGTSTP);
-
-            /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
-            sigprocmask(SIG_BLOCK, &mask, &prev_mask);
-
+            sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
             // add job to job list
             jid = add_job(pid, BG, cmdline);
-
-            /* Restore previous blocked set, unblocking SIGINT SIGCHLD AND
-             * SIGTSTP */
+            /* Restore previous blocked set */
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-
             sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
     }
@@ -286,12 +279,26 @@ void eval(const char *cmdline) {
  */
 void sigchld_handler(int sig) {
     int olderrno = errno;
-    while (waitpid(sig, NULL, 0) > 0) { /** TODO: correct style? */
+
+    __sigset_t full_mask, prev_mask;
+    sigfillset(&full_mask);
+
+    pid_t pid;
+    jid_t jid;
+
+    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) { /** TODO: correct style? */
+        sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+        if ((jid = job_from_pid(pid)) != 0) {
+            delete_job(jid);
+        }
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
 
     if (errno != ECHILD) {
-        sio_eprintf("waitpid error.");
+        perror("waitpid error. Sigchld handler");
     }
+
+    sleep(1);
     errno = olderrno;
 }
 
