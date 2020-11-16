@@ -177,7 +177,7 @@ bool eval_builtin_command(const struct cmdline_tokens *token) {
     }
     if (token->builtin == BUILTIN_JOBS) {
 
-        // block signals 
+        // block signals
         __sigset_t mask, prev_mask;
         sigemptyset(&mask);
         sigaddset(&mask, SIGINT);
@@ -211,6 +211,7 @@ void eval(const char *cmdline) {
     struct cmdline_tokens token;
     pid_t pid;
     jid_t jid;
+    __sigset_t mask, prev_mask;
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -232,17 +233,26 @@ void eval(const char *cmdline) {
             }
         }
 
+        // sigemptyset(&mask);
+        // sigaddset(&mask, SIGCHLD);
+        // sigsuspend(&mask);
+        // if (errno == EFAULT || errno == EINTR)
+        //     sio_eprintf("sigsuspend error. \n");
+
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
             int status;
             if (waitpid(pid, &status, 0) < 0)
-                sio_eprintf("waitfg: waitpid error\n"); // originally unix_error
-                                                        // not sure if this is
-                                                        // the correct fix
+                sio_eprintf(
+                    "waitfg: waitpid error\n"); /** TODO: originally unix_error
+                                                 * not sure if this is
+                                                 * the correct fix
+                                                 */
+
         } else {
 
             // block signals before adding to job list
-            __sigset_t mask, prev_mask;
+
             sigemptyset(&mask);
             sigaddset(&mask, SIGINT);
             sigaddset(&mask, SIGCHLD);
@@ -258,7 +268,7 @@ void eval(const char *cmdline) {
              * SIGTSTP */
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
-            printf("[%d] (%d) %s\n", jid, pid, cmdline);
+            sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
     }
     fflush(stdout);
@@ -274,7 +284,16 @@ void eval(const char *cmdline) {
  *
  * TODO: Delete this comment and replace it with your own.
  */
-void sigchld_handler(int sig) {}
+void sigchld_handler(int sig) {
+    int olderrno = errno;
+    while (waitpid(sig, NULL, 0) > 0) { /** TODO: correct style? */
+    }
+
+    if (errno != ECHILD) {
+        sio_eprintf("waitpid error.");
+    }
+    errno = olderrno;
+}
 
 /**
  * @brief <What does sigint_handler do?>
