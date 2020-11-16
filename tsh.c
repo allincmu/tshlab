@@ -190,24 +190,54 @@ void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
     pid_t pid;
+    jid_t jid;
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
 
+    // ignore empty lines and parse errors
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
         return;
     }
 
-    // turn this into helper int builtin_command(char **argv)
     if (token.builtin != BUILTIN_NONE) {
-        eval_builtin_command(&token); 
-    } else {
+        eval_builtin_command(&token);
+    } else { // evaluate builtin
+
         char **argv = token.argv;
-        if ((pid = fork() == 0)) {
+        if ((pid = fork()) == 0) { // child runs job
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
             }
+        }
+
+        /* Parent waits for foreground job to terminate */
+        if (parse_result != PARSELINE_BG) {
+            int status;
+            if (waitpid(pid, &status, 0) < 0)
+                printf("waitfg: waitpid error\n"); // originally unix_error not
+                                                   // sure if this is the
+                                                   // correct fix
+        } else {
+            // block signals
+            __sigset_t mask, prev_mask;
+            sigemptyset(&mask);
+            sigaddset(&mask, SIGINT);
+            sigaddset(&mask, SIGCHLD);
+            sigaddset(&mask, SIGTSTP);
+
+            /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
+            sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+
+            // add job to job list
+            jid = add_job(pid, BG, cmdline);
+
+            // Code region that will not be interrupted by SIGINT .
+            /* Restore previous blocked set, unblocking SIGINT */
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            printf("[%d] (%d) %s\n", jid, pid, cmdline);
+            exit(0);
         }
     }
     fflush(stdout);
