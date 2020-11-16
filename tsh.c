@@ -177,7 +177,7 @@ bool eval_builtin_command(const struct cmdline_tokens *token) {
     }
     if (token->builtin == BUILTIN_JOBS) {
 
-        // block signals
+        // block signals 
         __sigset_t mask, prev_mask;
         sigemptyset(&mask);
         sigaddset(&mask, SIGINT);
