@@ -172,6 +172,7 @@ int main(int argc, char **argv) {
 bool eval_builtin_command(const struct cmdline_tokens *token) {
     dbg_requires(token->builtin);
     if (token->builtin == BUILTIN_QUIT) {
+        fflush(stdout);
         // exit the shell
         exit(0);
     }
@@ -218,12 +219,14 @@ void eval(const char *cmdline) {
 
     sigfillset(&full_mask);
     sigaddset(&sigchld_mask, SIGCHLD);
+    sigemptyset(&prev_mask);
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
 
     // ignore empty lines and parse errors
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
+        fflush(stdout);
         return;
     }
 
@@ -237,24 +240,24 @@ void eval(const char *cmdline) {
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             if (execve(argv[0], argv, environ) < 0) {
                 sio_eprintf("%s: Command not found.\n", argv[0]);
+                fflush(stdout);
                 exit(0);
             }
+            sigprocmask(SIG_BLOCK, &sigchld_mask, NULL);
         }
-        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-
-        // sigemptyset(&mask);
-        // sigaddset(&mask, SIGCHLD);
-        // sigsuspend(&mask);
-        // if (errno == EFAULT || errno == EINTR)
-        //     sio_eprintf("sigsuspend error. \n");
 
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
-            // pid = 0;
-            // while (!pid) {
-            //     sigsuspend(&prev_mask);
-            // }
+            // sio_printf("hey what's up hello\n");
+
+            sigsuspend(&prev_mask);
+            fflush(stdout);
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+            // sio_printf("hey what's up hello\n");
+
         } else {
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             // block signals before adding to job list
             sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
             // add job to job list
@@ -278,6 +281,7 @@ void eval(const char *cmdline) {
  * TODO: Delete this comment and replace it with your own.
  */
 void sigchld_handler(int sig) {
+    // sio_printf("1738\n");
     int olderrno = errno;
 
     __sigset_t full_mask, prev_mask;
@@ -286,8 +290,9 @@ void sigchld_handler(int sig) {
     pid_t pid;
     jid_t jid;
 
-    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) { /** TODO: correct style? */
+    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
         sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+        // delete job from joblist if job is background job
         if ((jid = job_from_pid(pid)) != 0) {
             delete_job(jid);
         }
@@ -298,8 +303,8 @@ void sigchld_handler(int sig) {
         perror("waitpid error. Sigchld handler");
     }
 
-    sleep(1);
     errno = olderrno;
+    fflush(stdout);
 }
 
 /**
