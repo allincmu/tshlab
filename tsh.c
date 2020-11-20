@@ -246,26 +246,23 @@ void eval(const char *cmdline) {
             sigprocmask(SIG_BLOCK, &sigchld_mask, NULL);
         }
 
+        // block signals before adding to job list
+        sigprocmask(SIG_BLOCK, &full_mask, NULL);
+        // add job to job list
+        jid = add_job(pid, BG, cmdline);
+
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
-            // sio_printf("hey what's up hello\n");
-
-            sigsuspend(&prev_mask);
+            while (job_exists(jid))
+                sigsuspend(&prev_mask);
             fflush(stdout);
-            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-
-            // sio_printf("hey what's up hello\n");
+            if (verbose)
+                sio_printf("Process (%d) no longer foreground process.\n", pid);
 
         } else {
-            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-            // block signals before adding to job list
-            sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
-            // add job to job list
-            jid = add_job(pid, BG, cmdline);
-            /* Restore previous blocked set */
-            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
     fflush(stdout);
     // TODO: Implement commands here.
@@ -281,7 +278,8 @@ void eval(const char *cmdline) {
  * TODO: Delete this comment and replace it with your own.
  */
 void sigchld_handler(int sig) {
-    // sio_printf("1738\n");
+    if (verbose)
+        sio_printf("SIGCHLD_Handler: Entering\n");
     int olderrno = errno;
 
     __sigset_t full_mask, prev_mask;
@@ -290,20 +288,27 @@ void sigchld_handler(int sig) {
     pid_t pid;
     jid_t jid;
 
-    while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
+    while ((pid = waitpid(0, NULL, WNOHANG)) > 0) {
+
         sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
-        // delete job from joblist if job is background job
         if ((jid = job_from_pid(pid)) != 0) {
             delete_job(jid);
+            if (verbose)
+                sio_printf("SIGCHLD_Handler: Job [%d] deleted\n", jid);
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
 
     if (errno != ECHILD) {
-        perror("waitpid error. Sigchld handler");
+        if (verbose)
+            perror("waitpid error. Sigchld handler");
     }
 
     errno = olderrno;
+
+    if (verbose)
+        sio_printf("SIGCHLD_Handler: Exiting\n");
+
     fflush(stdout);
 }
 
