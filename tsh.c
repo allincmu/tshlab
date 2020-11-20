@@ -280,7 +280,9 @@ void eval(const char *cmdline) {
 void sigchld_handler(int sig) {
     if (verbose)
         sio_printf("SIGCHLD_Handler: Entering\n");
+
     int olderrno = errno;
+    int status;
 
     __sigset_t full_mask, prev_mask;
     sigfillset(&full_mask);
@@ -288,19 +290,27 @@ void sigchld_handler(int sig) {
     pid_t pid;
     jid_t jid;
 
-    while ((pid = waitpid(0, NULL, WNOHANG)) > 0) {
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
 
         sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
         if ((jid = job_from_pid(pid)) != 0) {
             delete_job(jid);
-            if (verbose)
-                sio_printf("SIGCHLD_Handler: Job [%d] deleted\n", jid);
+            if (verbose) {
+                sio_printf("SIGCHLD_Handler: Job [%d] (%d) deleted\n", jid,
+                           pid);
+                if
+                    WIFEXITED(status) {
+                        sio_printf("SIGCHLD_Handler: Job [%d] (%d) terminated "
+                                   "normally\n",
+                                   jid, pid);
+                    }
+            }
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
 
-    if (errno != ECHILD) {
-        if (verbose)
+    if (pid < 0 && errno != ECHILD) {
+        if (true)
             perror("waitpid error. Sigchld handler");
     }
 
