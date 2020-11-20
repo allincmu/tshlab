@@ -53,6 +53,13 @@ void sigint_handler(int sig);
 void sigquit_handler(int sig);
 void cleanup(void);
 
+typedef enum fork_return {
+    FORK_ERROR = -1,
+    CHILD_PROCESS = 0,
+} fork_return;
+
+typedef enum waitpid_return { WAITPID_ERROR = -1 } waitpid_return;
+
 /**
  * @brief <Write main's function header documentation. What does main do?>
  *
@@ -72,7 +79,7 @@ int main(int argc, char **argv) {
     // on the pipe connected to stdout)
     if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0) {
         perror("dup2 error");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     // Parse the command line
@@ -95,14 +102,14 @@ int main(int argc, char **argv) {
     // Create environment variable
     if (putenv("MY_ENV=42") < 0) {
         perror("putenv error");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     // Set buffering mode of stdout to line buffering.
     // This prevents lines from being printed in the wrong order.
     if (setvbuf(stdout, NULL, _IOLBF, 0) < 0) {
         perror("setvbuf error");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     // Initialize the job list
@@ -114,7 +121,7 @@ int main(int argc, char **argv) {
     // we trust that the OS will clean up any remaining resources.
     if (atexit(cleanup) < 0) {
         perror("atexit error");
-        exit(1);
+        exit(EXIT_FAILURE);
     }
 
     // Install the signal handlers
@@ -138,7 +145,7 @@ int main(int argc, char **argv) {
 
         if ((fgets(cmdline, MAXLINE_TSH, stdin) == NULL) && ferror(stdin)) {
             perror("fgets error");
-            exit(1);
+            exit(EXIT_FAILURE);
         }
 
         if (feof(stdin)) {
@@ -174,7 +181,7 @@ bool eval_builtin_command(const struct cmdline_tokens *token) {
     if (token->builtin == BUILTIN_QUIT) {
         fflush(stdout);
         // exit the shell
-        exit(0);
+        exit(EXIT_SUCCESS);
     }
     if (token->builtin == BUILTIN_JOBS) {
 
@@ -227,7 +234,7 @@ void eval(const char *cmdline) {
     // ignore empty lines and parse errors
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
         fflush(stdout);
-        return;
+        exit(EXIT_FAILURE);
     }
 
     if (token.builtin != BUILTIN_NONE) {
@@ -236,19 +243,20 @@ void eval(const char *cmdline) {
 
         sigprocmask(SIG_BLOCK, &sigchld_mask, &prev_mask);
         char **argv = token.argv;
-        if ((pid = fork()) == 0) { // child runs job
+        if ((pid = fork()) == FORK_ERROR) {
+            perror("fork error.");
+        } else if (pid == CHILD_PROCESS) { // child runs job
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             if (execve(argv[0], argv, environ) < 0) {
-                sio_eprintf("%s: Command not found.\n", argv[0]);
+                sio_eprintf("%s: No such file or directory\n", argv[0]);
                 fflush(stdout);
-                exit(0);
+                exit(EXIT_FAILURE);
             }
             sigprocmask(SIG_BLOCK, &sigchld_mask, NULL);
         }
 
         // block signals before adding to job list
         sigprocmask(SIG_BLOCK, &full_mask, NULL);
-        // add job to job list
         jid = add_job(pid, BG, cmdline);
 
         /* Parent waits for foreground job to terminate */
