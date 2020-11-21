@@ -247,6 +247,7 @@ void eval(const char *cmdline) {
             perror("fork error.");
         } else if (pid == CHILD_PROCESS) { // child runs job
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 sio_eprintf("%s: No such file or directory\n", argv[0]);
                 fflush(stdout);
@@ -298,28 +299,37 @@ void sigchld_handler(int sig) {
     pid_t pid;
     jid_t jid;
 
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    while ((pid = waitpid(-1, &status, WUNTRACED | WNOHANG)) > 0) {
 
         sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
         if ((jid = job_from_pid(pid)) != 0) {
-            delete_job(jid);
-            if (verbose) {
-                sio_printf("SIGCHLD_Handler: Job [%d] (%d) deleted\n", jid,
-                           pid);
-                if
-                    WIFEXITED(status) {
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                delete_job(jid);
+                if (verbose) {
+                    sio_printf("SIGCHLD_Handler: Job [%d] (%d) deleted\n", jid,
+                               pid);
+                    if (WIFEXITED(status)) {
                         sio_printf("SIGCHLD_Handler: Job [%d] (%d) terminated "
                                    "normally\n",
                                    jid, pid);
                     }
+                }
+                if (WIFSIGNALED(status)) {
+                    sio_printf("Job [%d] (%d) terminated by signal %d\n", jid,
+                               pid, WTERMSIG(status));
+                }
+            } else if (WIFSTOPPED(status)) {
+                sio_printf("Job [%d] (%d) stopped by signal %d\n", jid, pid,
+                           WSTOPSIG(status));
+                job_set_state(jid, ST);
             }
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
 
     if (pid < 0 && errno != ECHILD) {
-        if (true)
-            perror("waitpid error. Sigchld handler");
+
+        perror("waitpid error. Sigchld handler");
     }
 
     errno = olderrno;
