@@ -262,7 +262,7 @@ void eval(const char *cmdline) {
 
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
-            while (job_exists(jid))
+            while (job_exists(jid) && job_get_state(jid) != ST)
                 sigsuspend(&prev_mask);
             fflush(stdout);
             if (verbose)
