@@ -194,10 +194,10 @@ void wait_fg(jid_t jid, pid_t pid, sigset_t prev_mask) {
 
     while (job_exists(jid) && job_get_state(jid) != ST)
         sigsuspend(&prev_mask);
-    fflush(stdout);
     if (verbose)
         sio_printf("wait_fg: Process (%d) no longer foreground process.\n",
                    pid);
+    fflush(stdout);
 }
 
 void switch_state(const struct cmdline_tokens *token, job_state state) {
@@ -219,7 +219,8 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
     sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
 
     if (token->argc < argv_min_length) {
-        sio_eprintf("fg command requires PID or %%jobid argument\n");
+        sio_eprintf("%s command requires PID or %%jobid argument\n",
+                    token->argv[0]);
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return;
     } else {
@@ -228,6 +229,15 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
 
         // get jid and pid based on cmdline input
         if (job_arg[jid_prefix_index] == jid_prefix) {
+
+            // ensure the jid is numeric
+            if (!isdigit(job_arg[jid_offset])) {
+                sio_eprintf("%s: argument must be a PID or %%jobid\n",
+                            token->argv[0]);
+                sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+                return;
+            }
+
             jid = atoi(job_arg + jid_offset);
             if (job_exists(jid)) {
                 pid = job_get_pid(jid);
@@ -235,14 +245,29 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
                 pid = -1;
             }
         } else {
+
+            // ensure the pid is numeric
+            if (!isdigit(job_arg[0])) {
+                sio_eprintf("%s: argument must be a PID or %%jobid\n",
+                            token->argv[0]);
+                sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+                return;
+            }
             pid = atoi(job_arg);
             jid = job_from_pid(pid);
         }
-        // sio_printf("pid: %d \t jid: %d\n", pid, jid);
 
         // ensure job exists
         if (job_exists(jid)) {
+            if (job_get_state(jid) == ST) {
+                int neg_pid = 0 - pid;
+
+                // pid is negated because we want SIGCONT to be sent to every
+                // process in the pg
+                kill(neg_pid, SIGCONT);
+            }
             job_set_state(jid, state);
+
         } else {
             sio_eprintf("%s: No such job\n", job_arg);
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
@@ -250,6 +275,7 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
         }
 
         if (fg_job() != NO_FG_PROCESS) {
+            sio_assert(!sigismember(&prev_mask, SIGCHLD));
             wait_fg(jid, pid, prev_mask);
         } else {
             sio_printf("[%d] (%d) %s\n", jid, pid, job_get_cmdline(jid));
