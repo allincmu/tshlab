@@ -168,41 +168,124 @@ int main(int argc, char **argv) {
     return -1; // control never reaches here
 }
 
+void output_job_list() {
+    // block signals
+    sigset_t mask, prev_mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGCHLD);
+    sigaddset(&mask, SIGTSTP);
+
+    /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
+    sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+
+    // output job to stdout
+    list_jobs(STDOUT_FILENO);
+
+    /* Restore previous blocked set, unblocking SIGINT SIGCHLD AND
+     * SIGTSTP */
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+}
+
+void wait_fg(jid_t jid, pid_t pid, sigset_t prev_mask) {
+    if (verbose)
+        sio_printf("wait_fg: Waiting for Process (%d) to stop or terminate.\n",
+                   pid);
+
+    while (job_exists(jid) && job_get_state(jid) != ST)
+        sigsuspend(&prev_mask);
+    fflush(stdout);
+    if (verbose)
+        sio_printf("wait_fg: Process (%d) no longer foreground process.\n",
+                   pid);
+}
+
+void switch_state(const struct cmdline_tokens *token, job_state state) {
+    sigset_t full_mask, prev_mask;
+
+    const int job_index = 1;
+    const int argv_min_length = job_index + 1;
+    const int jid_offset = 1;
+    const char jid_prefix = '%';
+    const int jid_prefix_index = 0;
+
+    jid_t jid;
+    pid_t pid;
+
+    sigfillset(&full_mask);
+    sigemptyset(&prev_mask);
+
+    // block sigs
+    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+
+    if (token->argc < argv_min_length) {
+        sio_eprintf("fg command requires PID or %%jobid argument\n");
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        return;
+    } else {
+
+        char *job_arg = token->argv[job_index];
+
+        // get jid and pid based on cmdline input
+        if (job_arg[jid_prefix_index] == jid_prefix) {
+            jid = atoi(job_arg + jid_offset);
+            if (job_exists(jid)) {
+                pid = job_get_pid(jid);
+            } else {
+                pid = -1;
+            }
+        } else {
+            pid = atoi(job_arg);
+            jid = job_from_pid(pid);
+        }
+        // sio_printf("pid: %d \t jid: %d\n", pid, jid);
+
+        // ensure job exists
+        if (job_exists(jid)) {
+            job_set_state(jid, state);
+        } else {
+            sio_eprintf("%s: No such job\n", job_arg);
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            return;
+        }
+
+        if (fg_job() != NO_FG_PROCESS) {
+            wait_fg(jid, pid, prev_mask);
+        } else {
+            sio_printf("[%d] (%d) %s\n", jid, pid, job_get_cmdline(jid));
+        }
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        return;
+    }
+}
+
 /**
  * @brief <What does eval do?>
  *
  * TODO: Delete this comment and replace it with your own.
  *
- * NOTE: The shell is supposed to be a long-running process, so this function
- *       (and its helpers) should avoid exiting on error.  This is not to say
- *       they shouldn't detect and print (or otherwise handle) errors!
+ * NOTE: The shell is supposed to be a long-running process, so this
+ * function (and its helpers) should avoid exiting on error.  This is not to
+ * say they shouldn't detect and print (or otherwise handle) errors!
  */
-bool eval_builtin_command(const struct cmdline_tokens *token) {
+void eval_builtin_command(const struct cmdline_tokens *token) {
     dbg_requires(token->builtin);
-    if (token->builtin == BUILTIN_QUIT) {
+    switch (token->builtin) {
+    case BUILTIN_NONE:
+        return;
+    case BUILTIN_QUIT:
         // exit the shell
         exit(EXIT_SUCCESS);
+    case BUILTIN_JOBS:
+        output_job_list();
+        return;
+    case BUILTIN_BG:
+        switch_state(token, BG);
+        return;
+    case BUILTIN_FG:
+        switch_state(token, FG);
+        return;
     }
-    if (token->builtin == BUILTIN_JOBS) {
-
-        // block signals
-        __sigset_t mask, prev_mask;
-        sigemptyset(&mask);
-        sigaddset(&mask, SIGINT);
-        sigaddset(&mask, SIGCHLD);
-        sigaddset(&mask, SIGTSTP);
-
-        /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
-        sigprocmask(SIG_BLOCK, &mask, &prev_mask);
-
-        // output job to stdout
-        list_jobs(STDOUT_FILENO);
-
-        /* Restore previous blocked set, unblocking SIGINT SIGCHLD AND
-         * SIGTSTP */
-        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-    }
-    return 1;
 }
 
 /**
@@ -219,7 +302,7 @@ void eval(const char *cmdline) {
     struct cmdline_tokens token;
     pid_t pid;
     jid_t jid;
-    __sigset_t full_mask, sigchld_full_mask, prev_mask;
+    sigset_t full_mask, sigchld_full_mask, prev_mask;
 
     sigemptyset(&full_mask);
     sigemptyset(&sigchld_full_mask);
@@ -251,8 +334,7 @@ void eval(const char *cmdline) {
 
     if (token.builtin != BUILTIN_NONE) {
         eval_builtin_command(&token);
-    } else { // evaluate builtin
-
+    } else {
         sigprocmask(SIG_BLOCK, &sigchld_full_mask, &prev_mask);
         char **argv = token.argv;
         pid = fork();
@@ -283,22 +365,15 @@ void eval(const char *cmdline) {
             }
             exit(EXIT_FAILURE);
         }
-
-        /* Parent waits for foreground job to terminate */
-        if (parse_result != PARSELINE_BG) {
-            while (job_exists(jid) && job_get_state(jid) != ST)
-                sigsuspend(&prev_mask);
-            fflush(stdout);
-            if (verbose)
-                sio_printf(
-                    "wait_fg: Process (%d) no longer foreground process.\n",
-                    pid);
-
+        /* Parent waits for foreground job to terminate if there is one*/
+        if (fg_job() != NO_FG_PROCESS) {
+            wait_fg(jid, pid, prev_mask);
         } else {
             sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
+    fflush(stdout);
     // TODO: Implement commands here.
 }
 
@@ -318,7 +393,7 @@ void sigchld_handler(int sig) {
     int olderrno = errno;
     int status;
 
-    __sigset_t full_mask, prev_mask;
+    sigset_t full_mask, prev_mask;
     sigfillset(&full_mask);
 
     pid_t pid;
@@ -335,8 +410,8 @@ void sigchld_handler(int sig) {
                                pid);
                     if (WIFEXITED(status)) {
                         sio_printf("sigchld_handler: Job [%d] (%d) terminated "
-                                   "normally\n",
-                                   jid, pid);
+                                   "normally (status %d)\n",
+                                   jid, pid, WEXITSTATUS(status));
                     }
                 }
                 if (WIFSIGNALED(status)) {
@@ -375,7 +450,7 @@ void sigint_sigtstp_handler(int sig) {
         signal = "unknown signal";
     }
 
-    __sigset_t full_mask, prev_mask;
+    sigset_t full_mask, prev_mask;
 
     sigemptyset(&full_mask);
     sigfillset(&full_mask);
@@ -388,8 +463,8 @@ void sigint_sigtstp_handler(int sig) {
         pid_t pid = job_get_pid(jid);
         pid_t neg_pid = 0 - pid;
 
-        // we are passing in so that kill will send a signal to every process in
-        // the pid process group
+        // we are passing in so that kill will send a signal to every
+        // process in the pid process group
         kill(neg_pid, sig);
         if (verbose)
             sio_printf("%s_handler: Sent %s to Job [%d] (%d) \n", signal,
