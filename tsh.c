@@ -59,7 +59,7 @@ typedef enum fork_return {
 } fork_return;
 
 typedef enum waitpid_return { WAITPID_ERROR = -1 } waitpid_return;
-typedef enum fgjob_return { NO_FG_PROCESS = -1 } fgjob_return;
+typedef enum fgjob_return { NO_FG_PROCESS = 0 } fgjob_return;
 
 /**
  * @brief <Write main's function header documentation. What does main do?>
@@ -180,7 +180,6 @@ int main(int argc, char **argv) {
 bool eval_builtin_command(const struct cmdline_tokens *token) {
     dbg_requires(token->builtin);
     if (token->builtin == BUILTIN_QUIT) {
-        fflush(stdout);
         // exit the shell
         exit(EXIT_SUCCESS);
     }
@@ -220,16 +219,16 @@ void eval(const char *cmdline) {
     struct cmdline_tokens token;
     pid_t pid;
     jid_t jid;
-    __sigset_t full_mask, sigchld_sigint_sigtstp_mask, prev_mask;
+    __sigset_t full_mask, sigchld_full_mask, prev_mask;
 
     sigemptyset(&full_mask);
-    sigemptyset(&sigchld_sigint_sigtstp_mask);
+    sigemptyset(&sigchld_full_mask);
 
     // initialize masks
     sigfillset(&full_mask);
-    sigaddset(&sigchld_sigint_sigtstp_mask, SIGCHLD);
-    sigaddset(&sigchld_sigint_sigtstp_mask, SIGINT);
-    sigaddset(&sigchld_sigint_sigtstp_mask, SIGTSTP);
+    sigaddset(&sigchld_full_mask, SIGCHLD);
+    sigaddset(&sigchld_full_mask, SIGINT);
+    sigaddset(&sigchld_full_mask, SIGTSTP);
     sigemptyset(&prev_mask);
 
     // Parse command line
@@ -237,7 +236,6 @@ void eval(const char *cmdline) {
 
     // ignore empty lines and parse errors
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
-        fflush(stdout);
         exit(EXIT_FAILURE);
     }
 
@@ -255,19 +253,20 @@ void eval(const char *cmdline) {
         eval_builtin_command(&token);
     } else { // evaluate builtin
 
-        sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, &prev_mask);
+        sigprocmask(SIG_BLOCK, &sigchld_full_mask, &prev_mask);
         char **argv = token.argv;
-        if ((pid = fork()) == FORK_ERROR) {
+        pid = fork();
+        setpgid(0, 0); /** TODO: this seems incorrect */
+        if (pid == FORK_ERROR) {
             perror("fork error.");
         } else if (pid == CHILD_PROCESS) { // child runs job
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-            setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 sio_eprintf("%s: No such file or directory\n", argv[0]);
                 fflush(stdout);
                 exit(EXIT_FAILURE);
             }
-            sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, NULL);
+            sigprocmask(SIG_BLOCK, &sigchld_full_mask, NULL);
         }
 
         if (process_state != UNDEF) {
@@ -276,7 +275,7 @@ void eval(const char *cmdline) {
             jid = add_job(pid, process_state, cmdline);
         } else {
             if (process_state == UNDEF) {
-                sio_eprintf("Shell error: jobstate is undefined.");
+                sio_eprintf("Shell error: jobstate is undefined.\n");
 
             } else {
                 sio_eprintf("shell_error: Tried to add forground processs when "
@@ -291,14 +290,15 @@ void eval(const char *cmdline) {
                 sigsuspend(&prev_mask);
             fflush(stdout);
             if (verbose)
-                sio_printf("Process (%d) no longer foreground process.\n", pid);
+                sio_printf(
+                    "wait_fg: Process (%d) no longer foreground process.\n",
+                    pid);
 
         } else {
             sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
-    fflush(stdout);
     // TODO: Implement commands here.
 }
 
@@ -313,7 +313,7 @@ void eval(const char *cmdline) {
  */
 void sigchld_handler(int sig) {
     if (verbose)
-        sio_printf("SIGCHLD_Handler: Entering\n");
+        sio_printf("sigchld_handler: entering\n");
 
     int olderrno = errno;
     int status;
@@ -331,10 +331,10 @@ void sigchld_handler(int sig) {
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
                 delete_job(jid);
                 if (verbose) {
-                    sio_printf("SIGCHLD_Handler: Job [%d] (%d) deleted\n", jid,
+                    sio_printf("sigchld_handler: Job [%d] (%d) deleted\n", jid,
                                pid);
                     if (WIFEXITED(status)) {
-                        sio_printf("SIGCHLD_Handler: Job [%d] (%d) terminated "
+                        sio_printf("sigchld_handler: Job [%d] (%d) terminated "
                                    "normally\n",
                                    jid, pid);
                     }
@@ -359,8 +359,43 @@ void sigchld_handler(int sig) {
     errno = olderrno;
 
     if (verbose)
-        sio_printf("SIGCHLD_Handler: Exiting\n");
+        sio_printf("sigchld_handler: exiting\n");
     fflush(stdout);
+}
+
+void sigint_sigtstp_handler(int sig) {
+    // for debug output
+    char *signal;
+
+    if (sig == SIGINT) {
+        signal = "sigint";
+    } else if (sig == SIGTSTP) {
+        signal = "sigtstp";
+    } else {
+        signal = "unknown signal";
+    }
+
+    __sigset_t full_mask, prev_mask;
+
+    sigemptyset(&full_mask);
+    sigfillset(&full_mask);
+    sigemptyset(&prev_mask);
+
+    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+    jid_t jid = fg_job();
+
+    if (jid != NO_FG_PROCESS) {
+        pid_t pid = job_get_pid(jid);
+        pid_t neg_pid = 0 - pid;
+
+        // we are passing in so that kill will send a signal to every process in
+        // the pid process group
+        kill(neg_pid, sig);
+        if (verbose)
+            sio_printf("%s_handler: Sent %s to Job [%d] (%d) \n", signal,
+                       signal, jid, pid);
+    }
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 }
 
 /**
@@ -369,31 +404,14 @@ void sigchld_handler(int sig) {
  * TODO: Delete this comment and replace it with your own.
  */
 void sigint_handler(int sig) {
-    if (verbose)
-        sio_printf("sigint_handler: Entering\n");
-
     int olderrno = errno;
-    __sigset_t full_mask, prev_mask;
+    if (verbose)
+        sio_printf("sigint_handler: entering\n");
 
-    sigfillset(&full_mask);
-    sigemptyset(&prev_mask);
-
-    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
-    jid_t jid = fg_job();
-
-    if (jid > 0) {
-        pid_t pid = job_get_pid(jid);
-        kill(pid, SIGINT);
-        if (verbose)
-            sio_printf("sigint_handler: Sent SIGINT to Job [%d] (%d) \n", jid,
-                       pid);
-    }
-
-    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+    sigint_sigtstp_handler(sig);
 
     if (verbose)
         sio_printf("sigint_handler: Exiting\n");
-
     errno = olderrno;
 }
 
@@ -403,27 +421,11 @@ void sigint_handler(int sig) {
  * TODO: Delete this comment and replace it with your own.
  */
 void sigtstp_handler(int sig) {
-    if (verbose)
-        sio_printf("sigtstp_handler: Entering\n");
     int olderrno = errno;
+    if (verbose)
+        sio_printf("sigtstp_handler: entering\n");
 
-    __sigset_t full_mask, prev_mask;
-
-    sigfillset(&full_mask);
-    sigemptyset(&prev_mask);
-
-    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
-    jid_t jid = fg_job();
-
-    if (jid > 0) {
-        pid_t pid = job_get_pid(jid);
-        kill(pid, SIGTSTP);
-        if (verbose)
-            sio_printf("sigtstp_handler: Sent SIGTSTP to Job [%d] (%d) \n", jid,
-                       pid);
-    }
-
-    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+    sigint_sigtstp_handler(sig);
 
     if (verbose)
         sio_printf("sigtstp_handler: Exiting\n");
