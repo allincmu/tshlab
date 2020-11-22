@@ -59,6 +59,7 @@ typedef enum fork_return {
 } fork_return;
 
 typedef enum waitpid_return { WAITPID_ERROR = -1 } waitpid_return;
+typedef enum fgjob_return { NO_FG_PROCESS = -1 } fgjob_return;
 
 /**
  * @brief <Write main's function header documentation. What does main do?>
@@ -219,13 +220,16 @@ void eval(const char *cmdline) {
     struct cmdline_tokens token;
     pid_t pid;
     jid_t jid;
-    __sigset_t full_mask, sigchld_mask, prev_mask;
+    __sigset_t full_mask, sigchld_sigint_sigtstp_mask, prev_mask;
 
     sigemptyset(&full_mask);
-    sigemptyset(&sigchld_mask);
+    sigemptyset(&sigchld_sigint_sigtstp_mask);
 
+    // initialize masks
     sigfillset(&full_mask);
-    sigaddset(&sigchld_mask, SIGCHLD);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGCHLD);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGINT);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGTSTP);
     sigemptyset(&prev_mask);
 
     // Parse command line
@@ -237,11 +241,21 @@ void eval(const char *cmdline) {
         exit(EXIT_FAILURE);
     }
 
+    /** TODO: make helper */
+    job_state process_state = UNDEF;
+    if (parse_result == PARSELINE_BG) {
+        process_state = BG;
+    } else if (parse_result == PARSELINE_FG) {
+        process_state = FG;
+    } else {
+        exit(EXIT_FAILURE);
+    }
+
     if (token.builtin != BUILTIN_NONE) {
         eval_builtin_command(&token);
     } else { // evaluate builtin
 
-        sigprocmask(SIG_BLOCK, &sigchld_mask, &prev_mask);
+        sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, &prev_mask);
         char **argv = token.argv;
         if ((pid = fork()) == FORK_ERROR) {
             perror("fork error.");
@@ -253,12 +267,23 @@ void eval(const char *cmdline) {
                 fflush(stdout);
                 exit(EXIT_FAILURE);
             }
-            sigprocmask(SIG_BLOCK, &sigchld_mask, NULL);
+            sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, NULL);
         }
 
-        // block signals before adding to job list
-        sigprocmask(SIG_BLOCK, &full_mask, NULL);
-        jid = add_job(pid, BG, cmdline);
+        if (process_state != UNDEF) {
+            // block signals before adding to job list
+            sigprocmask(SIG_BLOCK, &full_mask, NULL);
+            jid = add_job(pid, process_state, cmdline);
+        } else {
+            if (process_state == UNDEF) {
+                sio_eprintf("Shell error: jobstate is undefined.");
+
+            } else {
+                sio_eprintf("shell_error: Tried to add forground processs when "
+                            "one already exists.\n");
+            }
+            exit(EXIT_FAILURE);
+        }
 
         /* Parent waits for foreground job to terminate */
         if (parse_result != PARSELINE_BG) {
@@ -328,7 +353,6 @@ void sigchld_handler(int sig) {
     }
 
     if (pid < 0 && errno != ECHILD) {
-
         perror("waitpid error. Sigchld handler");
     }
 
@@ -336,7 +360,6 @@ void sigchld_handler(int sig) {
 
     if (verbose)
         sio_printf("SIGCHLD_Handler: Exiting\n");
-
     fflush(stdout);
 }
 
@@ -345,14 +368,67 @@ void sigchld_handler(int sig) {
  *
  * TODO: Delete this comment and replace it with your own.
  */
-void sigint_handler(int sig) {}
+void sigint_handler(int sig) {
+    if (verbose)
+        sio_printf("sigint_handler: Entering\n");
+
+    int olderrno = errno;
+    __sigset_t full_mask, prev_mask;
+
+    sigfillset(&full_mask);
+    sigemptyset(&prev_mask);
+
+    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+    jid_t jid = fg_job();
+
+    if (jid > 0) {
+        pid_t pid = job_get_pid(jid);
+        kill(pid, SIGINT);
+        if (verbose)
+            sio_printf("sigint_handler: Sent SIGINT to Job [%d] (%d) \n", jid,
+                       pid);
+    }
+
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+    if (verbose)
+        sio_printf("sigint_handler: Exiting\n");
+
+    errno = olderrno;
+}
 
 /**
  * @brief <What does sigtstp_handler do?>
  *
  * TODO: Delete this comment and replace it with your own.
  */
-void sigtstp_handler(int sig) {}
+void sigtstp_handler(int sig) {
+    if (verbose)
+        sio_printf("sigtstp_handler: Entering\n");
+    int olderrno = errno;
+
+    __sigset_t full_mask, prev_mask;
+
+    sigfillset(&full_mask);
+    sigemptyset(&prev_mask);
+
+    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+    jid_t jid = fg_job();
+
+    if (jid > 0) {
+        pid_t pid = job_get_pid(jid);
+        kill(pid, SIGTSTP);
+        if (verbose)
+            sio_printf("sigtstp_handler: Sent SIGTSTP to Job [%d] (%d) \n", jid,
+                       pid);
+    }
+
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+    if (verbose)
+        sio_printf("sigtstp_handler: Exiting\n");
+    errno = olderrno;
+}
 
 /**
  * @brief Attempt to clean up global resources when the program exits.
