@@ -291,7 +291,7 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
             job_set_state(jid, state);
 
         } else {
-            sio_eprintf("%s: No such job\n", job_arg);
+            sio_eprintf("%s: No such job or process id\n", job_arg);
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             return;
         }
@@ -465,7 +465,26 @@ void eval(const char *cmdline) {
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
-    // TODO: Implement commands here.
+}
+
+void print_job_interupt(int status, jid_t jid, pid_t pid) {
+    if (verbose && WIFEXITED(status)) {
+
+        sio_printf("sigchld_handler: Job [%d] (%d) deleted\n", jid, pid);
+        sio_printf("sigchld_handler: Job [%d] (%d) terminated "
+                   "normally (status %d)\n",
+                   jid, pid, WEXITSTATUS(status));
+
+    } else if (WIFSIGNALED(status)) {
+
+        sio_printf("Job [%d] (%d) terminated by signal %d\n", jid, pid,
+                   WTERMSIG(status));
+
+    } else if (WIFSTOPPED(status)) {
+
+        sio_printf("Job [%d] (%d) stopped by signal %d\n", jid, pid,
+                   WSTOPSIG(status));
+    }
 }
 
 /*****************
@@ -473,45 +492,63 @@ void eval(const char *cmdline) {
  *****************/
 
 /**
- * @brief <What does sigchld_handler do?>
+ * @brief Reaps child processes when child is stopped or terminated
  *
- * TODO: Delete this comment and replace it with your own.
+ * When a SIGCHLD is recieved, the handler reaps as many children as it is able
+ * to because SIGCHLD signals can coalesce. To prevent execution of the signal
+ * handler from being interupted all signals are blocked inside the handler.
+ *
+ * If the child process is terminated normally, the process is removed from the
+ * job list. If the child is terminated by a signal, the process is removed from
+ * the job list and the signal that stopped the child is printed to the shell.
+ * If the child is terminated by a signal, the process is removed from the job
+ * list and the signal that stopped the child is printed to the shell. If the
+ * child is stopped by a signal, the state of the process is set to stopped in
+ * the job list and and the signal that stopped the child is printed to the
+ * shell.
+ *
+ * @param[in] sig - The signal that is being passed into the signal handler
+ *
+ * @remark all signals are blocked inside handler
  */
 void sigchld_handler(int sig) {
+
+    sigset_t full_mask, prev_mask;
+    int olderrno, status;
+    pid_t pid;
+    jid_t jid;
+
     if (verbose)
         sio_printf("sigchld_handler: entering\n");
 
-    int olderrno = errno;
-    int status;
+    // save errno to restore on exit
+    olderrno = errno;
 
-    sigset_t full_mask, prev_mask;
+    // initialize signal blocking masks
     sigfillset(&full_mask);
+    sigemptyset(&prev_mask);
 
-    pid_t pid;
-    jid_t jid;
+    // block signals inside handler to prevent interuption of execution
     sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
+
+    // reap as many children as possible since signals can coalesce
     while ((pid = waitpid(-1, &status, WUNTRACED | WNOHANG)) > 0) {
 
-        if ((jid = job_from_pid(pid)) != 0) {
+        jid = job_from_pid(pid);
+        if (job_exists(jid)) {
+
+            // job is terminated normally or by signal
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
+
                 delete_job(jid);
-                if (verbose) {
-                    sio_printf("sigchld_handler: Job [%d] (%d) deleted\n", jid,
-                               pid);
-                    if (WIFEXITED(status)) {
-                        sio_printf("sigchld_handler: Job [%d] (%d) terminated "
-                                   "normally (status %d)\n",
-                                   jid, pid, WEXITSTATUS(status));
-                    }
-                }
-                if (WIFSIGNALED(status)) {
-                    sio_printf("Job [%d] (%d) terminated by signal %d\n", jid,
-                               pid, WTERMSIG(status));
-                }
-            } else if (WIFSTOPPED(status)) {
-                sio_printf("Job [%d] (%d) stopped by signal %d\n", jid, pid,
-                           WSTOPSIG(status));
+                print_job_interupt(status, jid, pid);
+            }
+
+            // job is stopped by signal
+            else if (WIFSTOPPED(status)) {
+
                 job_set_state(jid, ST);
+                print_job_interupt(status, jid, pid);
             }
         }
     }
@@ -519,31 +556,34 @@ void sigchld_handler(int sig) {
     if (pid < 0 && errno != ECHILD) {
         perror("waitpid error. Sigchld handler");
     }
+
+    // unblock signals before exiting
     sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+    // restore ernno
     errno = olderrno;
 
     if (verbose)
         sio_printf("sigchld_handler: exiting\n");
 }
 
-void sigint_sigtstp_handler(int sig) {
-    // for debug output
-    char *signal;
+/**
+ * @brief <What does sigchld_handler do?>
+ *
+ * TODO: Delete this comment and replace it with your own.
+ */
+void sigint_sigtstp_handler(int sig, char *signal) {
 
-    if (sig == SIGINT) {
-        signal = "sigint";
-    } else if (sig == SIGTSTP) {
-        signal = "sigtstp";
-    } else {
-        signal = "unknown signal";
-    }
+    // This handler should only process SIGING and SIGTSTP signals
+    sio_assert(sig == SIGINT || sig == SIGTSTP);
 
+    // initialize masks
     sigset_t full_mask, prev_mask;
-
     sigemptyset(&full_mask);
     sigfillset(&full_mask);
     sigemptyset(&prev_mask);
 
+    // block signals before manpulating/accessing the job list
     sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
     jid_t jid = fg_job();
 
@@ -554,10 +594,13 @@ void sigint_sigtstp_handler(int sig) {
         // we are passing in so that kill will send a signal to every
         // process in the pid process group
         kill(neg_pid, sig);
+
         if (verbose)
             sio_printf("%s_handler: Sent %s to Job [%d] (%d) \n", signal,
                        signal, jid, pid);
     }
+
+    // restore masks before exiting
     sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 }
 
@@ -571,7 +614,7 @@ void sigint_handler(int sig) {
     if (verbose)
         sio_printf("sigint_handler: entering\n");
 
-    sigint_sigtstp_handler(sig);
+    sigint_sigtstp_handler(sig, "sigint");
 
     if (verbose)
         sio_printf("sigint_handler: Exiting\n");
@@ -588,7 +631,7 @@ void sigtstp_handler(int sig) {
     if (verbose)
         sio_printf("sigtstp_handler: entering\n");
 
-    sigint_sigtstp_handler(sig);
+    sigint_sigtstp_handler(sig, "sigtstp");
 
     if (verbose)
         sio_printf("sigtstp_handler: Exiting\n");
