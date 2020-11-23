@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
     return -1; // control never reaches here
 }
 
-void output_job_list() {
+void output_job_list(const struct cmdline_tokens *token) {
     // block signals
     sigset_t mask, prev_mask;
     sigemptyset(&mask);
@@ -179,8 +179,31 @@ void output_job_list() {
     /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
     sigprocmask(SIG_BLOCK, &mask, &prev_mask);
 
-    // output job to stdout
-    list_jobs(STDOUT_FILENO);
+    /* Open outfile */
+    int fd_outfile;
+
+    if (token->outfile != NULL) {
+
+        if ((fd_outfile = open(token->outfile, O_CREAT | O_WRONLY | O_TRUNC,
+                               DEF_MODE)) < 0) {
+            perror(token->outfile);
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            return;
+        }
+
+        // output job to outfile
+        list_jobs(fd_outfile);
+
+        // close outfile
+        if (close(fd_outfile) < 0) {
+            perror("close error");
+            exit(EXIT_FAILURE);
+        }
+    } else {
+
+        // output job to stdout
+        list_jobs(STDOUT_FILENO);
+    }
 
     /* Restore previous blocked set, unblocking SIGINT SIGCHLD AND
      * SIGTSTP */
@@ -303,7 +326,7 @@ void eval_builtin_command(const struct cmdline_tokens *token) {
         // exit the shell
         exit(EXIT_SUCCESS);
     case BUILTIN_JOBS:
-        output_job_list();
+        output_job_list(token);
         return;
     case BUILTIN_BG:
         switch_state(token, BG);
@@ -313,6 +336,87 @@ void eval_builtin_command(const struct cmdline_tokens *token) {
         return;
     }
 }
+
+void redirect_input(const struct cmdline_tokens *token) {
+    int fd_infile, fd_outfile;
+    bool open_error = false;
+
+    if (token->infile != NULL) {
+        if ((fd_infile = open(token->infile, O_RDONLY)) < 0) {
+            perror(token->infile);
+            open_error = true;
+            exit(EXIT_FAILURE);
+        }
+        if (!open_error && (dup2(fd_infile, STDIN_FILENO) < 0)) {
+            perror("dup2 error infile");
+            exit(EXIT_FAILURE);
+        }
+        if (!open_error && (close(fd_infile) < 0)) {
+            perror("close error infile");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    open_error = false;
+    if (token->outfile != NULL) {
+        if ((fd_outfile = open(token->outfile, O_CREAT | O_WRONLY | O_TRUNC,
+                               DEF_MODE)) < 0) {
+            perror(token->outfile);
+            open_error = true;
+            exit(EXIT_FAILURE);
+        }
+        if (!open_error && (dup2(fd_outfile, STDOUT_FILENO) < 0)) {
+            perror("dup2 error outfile");
+            exit(EXIT_FAILURE);
+        }
+        if (!open_error && close(fd_outfile) < 0) {
+            perror("close error outfile");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+// void redirect_input(const struct cmdline_tokens *token) {
+//     int fd_infile, fd_outfile;
+
+//     // if (token->infile != NULL) {
+//     //     if ((fd_infile = open(token->infile, O_RDONLY)) < 0) {
+//     //         perror("open error");
+//     //         exit(EXIT_FAILURE);
+//     //     }
+//     //     if (dup2(fd_infile, STDIN_FILENO) < 0) {
+//     //         perror("dup2 error");
+//     //         exit(EXIT_FAILURE);
+//     //     }
+//     //     if (close(fd_infile) < 0) {
+//     //         perror("close error");
+//     //         exit(EXIT_FAILURE);
+//     //     }
+//     // }
+
+//     if (dup2(fd_outfile, STDOUT_FILENO) < 0) {
+//         perror("dup2 error");
+//         exit(EXIT_FAILURE);
+//     }
+// }
+// }
+
+// void reset_stdout() {
+
+//     if (dup2(STDIN_FILENO, STDIN_FILENO) < 0) {
+//         perror("dup2 error");
+//         exit(EXIT_FAILURE);
+//     }
+
+//     if (dup2(STDOUT_FILENO, STDOUT_FILENO) < 0) {
+//         perror("dup2 error");
+//         exit(EXIT_FAILURE);
+//     }
+//     if (dup2(STDERR_FILENO, STDERR_FILENO) < 0) {
+//         perror("dup2 error");
+//         exit(EXIT_FAILURE);
+//     }
+// }
 
 /**
  * @brief <What does eval do?>
@@ -365,9 +469,14 @@ void eval(const char *cmdline) {
         char **argv = token.argv;
         pid = fork();
         setpgid(0, 0); /** TODO: this seems incorrect */
+
         if (pid == FORK_ERROR) {
             perror("fork error.");
         } else if (pid == CHILD_PROCESS) { // child runs job
+            // redirect infile to STDIN
+            fflush(stdout);
+            redirect_input(&token);
+
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             if (execve(argv[0], argv, environ) < 0) {
                 sio_eprintf("%s: No such file or directory\n", argv[0]);

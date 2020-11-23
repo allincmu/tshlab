@@ -3,44 +3,44 @@
 #
 
 # Try to execute non-existent command
-/bin/echo -e tsh\076 runtrace.tmp/idontexist
+/bin/echo -e tsh\076 idontexist
 NEXT
-runtrace.tmp/idontexist
-NEXT
-
-/bin/echo -e tsh\076 testprogs/mycat \074 runtrace.tmp/idontexist
-NEXT
-testprogs/mycat < runtrace.tmp/idontexist
+idontexist
 NEXT
 
-/bin/echo -e tsh\076 /bin/touch runtrace.tmp/badpermissions
+/bin/echo -e tsh\076 testprogs/mycat \074 idontexist
 NEXT
-/bin/touch runtrace.tmp/badpermissions
-NEXT
-
-/bin/echo -e tsh\076 /bin/chmod 000 runtrace.tmp/badpermissions
-NEXT
-/bin/chmod 000 runtrace.tmp/badpermissions
+testprogs/mycat < idontexist
 NEXT
 
-/bin/echo -e tsh\076 testprogs/mycat \074 runtrace.tmp/badpermissions
+/bin/echo -e tsh\076 /bin/touch badpermissions
 NEXT
-testprogs/mycat < runtrace.tmp/badpermissions
-NEXT
-
-/bin/echo -e tsh\076 jobs \076 runtrace.tmp/badpermissions
-NEXT
-jobs > runtrace.tmp/badpermissions
+/bin/touch badpermissions
 NEXT
 
-/bin/echo -e tsh\076 /bin/echo "Test" \076 runtrace.tmp/badpermissions
+/bin/echo -e tsh\076 /bin/chmod 000 badpermissions
 NEXT
-/bin/echo "Test" > runtrace.tmp/badpermissions
+/bin/chmod 000 badpermissions
 NEXT
 
-/bin/echo -e tsh\076 runtrace.tmp/badpermissions
+/bin/echo -e tsh\076 testprogs/mycat \074 badpermissions
 NEXT
-runtrace.tmp/badpermissions
+testprogs/mycat < badpermissions
+NEXT
+
+/bin/echo -e tsh\076 jobs \076 badpermissions
+NEXT
+jobs > badpermissions
+NEXT
+
+/bin/echo -e tsh\076 /bin/echo "Test" \076 badpermissions
+NEXT
+/bin/echo "Test" > badpermissions
+NEXT
+
+/bin/echo -e tsh\076 badpermissions
+NEXT
+badpermissions
 NEXT
 
 quit
