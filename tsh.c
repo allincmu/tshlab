@@ -220,7 +220,6 @@ void wait_fg(jid_t jid, pid_t pid, sigset_t prev_mask) {
     if (verbose)
         sio_printf("wait_fg: Process (%d) no longer foreground process.\n",
                    pid);
-    fflush(stdout);
 }
 
 void switch_state(const struct cmdline_tokens *token, job_state state) {
@@ -376,48 +375,6 @@ void redirect_input(const struct cmdline_tokens *token) {
     }
 }
 
-// void redirect_input(const struct cmdline_tokens *token) {
-//     int fd_infile, fd_outfile;
-
-//     // if (token->infile != NULL) {
-//     //     if ((fd_infile = open(token->infile, O_RDONLY)) < 0) {
-//     //         perror("open error");
-//     //         exit(EXIT_FAILURE);
-//     //     }
-//     //     if (dup2(fd_infile, STDIN_FILENO) < 0) {
-//     //         perror("dup2 error");
-//     //         exit(EXIT_FAILURE);
-//     //     }
-//     //     if (close(fd_infile) < 0) {
-//     //         perror("close error");
-//     //         exit(EXIT_FAILURE);
-//     //     }
-//     // }
-
-//     if (dup2(fd_outfile, STDOUT_FILENO) < 0) {
-//         perror("dup2 error");
-//         exit(EXIT_FAILURE);
-//     }
-// }
-// }
-
-// void reset_stdout() {
-
-//     if (dup2(STDIN_FILENO, STDIN_FILENO) < 0) {
-//         perror("dup2 error");
-//         exit(EXIT_FAILURE);
-//     }
-
-//     if (dup2(STDOUT_FILENO, STDOUT_FILENO) < 0) {
-//         perror("dup2 error");
-//         exit(EXIT_FAILURE);
-//     }
-//     if (dup2(STDERR_FILENO, STDERR_FILENO) < 0) {
-//         perror("dup2 error");
-//         exit(EXIT_FAILURE);
-//     }
-// }
-
 /**
  * @brief <What does eval do?>
  *
@@ -474,13 +431,13 @@ void eval(const char *cmdline) {
             perror("fork error.");
         } else if (pid == CHILD_PROCESS) { // child runs job
             // redirect infile to STDIN
-            fflush(stdout);
             redirect_input(&token);
 
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             if (execve(argv[0], argv, environ) < 0) {
-                sio_eprintf("%s: No such file or directory\n", argv[0]);
-                fflush(stdout);
+                if (access(argv[0], R_OK) < 0) {
+                    perror(argv[0]);
+                }
                 exit(EXIT_FAILURE);
             }
             sigprocmask(SIG_BLOCK, &sigchld_full_mask, NULL);
@@ -508,7 +465,6 @@ void eval(const char *cmdline) {
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
-    fflush(stdout);
     // TODO: Implement commands here.
 }
 
@@ -533,10 +489,9 @@ void sigchld_handler(int sig) {
 
     pid_t pid;
     jid_t jid;
-
+    sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
     while ((pid = waitpid(-1, &status, WUNTRACED | WNOHANG)) > 0) {
 
-        sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
         if ((jid = job_from_pid(pid)) != 0) {
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
                 delete_job(jid);
@@ -559,18 +514,16 @@ void sigchld_handler(int sig) {
                 job_set_state(jid, ST);
             }
         }
-        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     }
 
     if (pid < 0 && errno != ECHILD) {
         perror("waitpid error. Sigchld handler");
     }
-
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
     errno = olderrno;
 
     if (verbose)
         sio_printf("sigchld_handler: exiting\n");
-    fflush(stdout);
 }
 
 void sigint_sigtstp_handler(int sig) {
