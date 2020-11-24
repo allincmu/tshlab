@@ -53,22 +53,23 @@ void sigint_handler(int sig);
 void sigquit_handler(int sig);
 void cleanup(void);
 
-typedef enum fork_return {
-    CHILD_PROCESS = 0,
-} fork_return;
-
-typedef enum syscall_return { syscall_error = -1 } syscall_return;
+/* Defines enums for the return values of various functions */
+typedef enum fork_return { CHILD_PROCESS = 0 } fork_return;
+typedef enum function_return { ERROR = -1, SUCCESS = 1 } function_return;
 typedef enum fgjob_return { NO_FG_PROCESS = 0 } fgjob_return;
 
 /**
- * @brief <Write main's function header documentation. What does main do?>
+ * @brief initiates the shell's data structures and drives the shell's read and
+ * eval loop
  *
- * TODO: Delete this comment and replace it with your own.
+ * Sets STDERR to STDOUT and sets STDOUT to line buffering. Parses the cmdline
+ * to determine verbosity of the output. Sets the environment variable.
+ * initiates the job list. Installs signal handlers and starts the shell's read
+ * and eval loop.
  *
- * "Each function should be prefaced with a comment describing the purpose
- *  of the function (in a sentence or two), the function's arguments and
- *  return value, any error cases that are relevant to the caller,
- *  any pertinent side effects, and any assumptions that the function makes."
+ *
+ * @param[in] argc The number of cmdline args
+ * @param[in] argv A pointer to an array of cmdline arguments
  */
 int main(int argc, char **argv) {
     char c;
@@ -166,11 +167,21 @@ int main(int argc, char **argv) {
 
     return -1; // control never reaches here
 }
-
+/**
+ * @brief outputs the job list to outfile if specfied or stdout if outfile is
+ * not specified
+ *
+ * param[in] token A pointer to a cmdline_tokens struct containing the path of
+ * the  outfile
+ *
+ */
 void output_job_list(const struct cmdline_tokens *token) {
-    // block signals
+
     sigset_t mask, prev_mask;
+    int fd_outfile;
+
     sigemptyset(&mask);
+    sigemptyset(&prev_mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGCHLD);
     sigaddset(&mask, SIGTSTP);
@@ -178,57 +189,146 @@ void output_job_list(const struct cmdline_tokens *token) {
     /* Block SIGINT SIGCHILD AND SIGTSP and save previous blocked set */
     sigprocmask(SIG_BLOCK, &mask, &prev_mask);
 
-    /* Open outfile */
-    int fd_outfile;
-
     if (token->outfile != NULL) {
 
+        // outfile is specfied so create or open outfile, truncate, and write
+        // job list to it
         if ((fd_outfile = open(token->outfile, O_CREAT | O_WRONLY | O_TRUNC,
                                DEF_MODE)) < 0) {
             perror(token->outfile);
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             return;
         }
-
-        // output job to outfile
         list_jobs(fd_outfile);
-
-        // close outfile
         if (close(fd_outfile) < 0) {
             perror("close error");
             exit(EXIT_FAILURE);
         }
-    } else {
 
-        // output job to stdout
+    } else { // outfile not specified -> output job to stdout
         list_jobs(STDOUT_FILENO);
     }
 
-    /* Restore previous blocked set, unblocking SIGINT SIGCHLD AND
-     * SIGTSTP */
+    /* unblock SIGINT SIGCHLD AND SIGTSTP */
     sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 }
 
+/**
+ * @brief waits for the foreground process to terminate using sigsuspend
+ *
+ * @param[in] jid The jid of the fg process
+ * @param[in] pid The pid of the process to be
+ * @param[in] prev_mask a mask where SIGCHLD signals are not blocked
+ *
+ * @pre all signals are blocked prior to calling
+ * @pre SIGCHLD signals are not blocked in prev_mask
+ * @pre the specified job is the foreground job
+ */
 void wait_fg(jid_t jid, pid_t pid, sigset_t prev_mask) {
+
+    sio_assert(!sigismember(&prev_mask, SIGCHLD));
+    sio_assert(fg_job() == jid);
+
     if (verbose)
         sio_printf("wait_fg: Waiting for Process (%d) to stop or terminate.\n",
                    pid);
 
-    while (job_exists(jid) && job_get_state(jid) != ST)
+    // wait until fg job has terminated
+    while (fg_job() == jid)
         sigsuspend(&prev_mask);
     if (verbose)
         sio_printf("wait_fg: Process (%d) no longer foreground process.\n",
                    pid);
 }
 
+/**
+ * @brief parses the command line for the pid or jid then sets the value that
+ * pid and jid point to to the pid and jid of the job
+ *
+ * If the job is prefixed with a '%', it is a jid. The jid is parsed and the pid
+ * is determined from the jid.
+ *
+ * If the job is just a number, it is a pid, and the pid is parsed and the jid
+ * is determined from the pid.
+ *
+ * @param[in] token A pointer to a cmdline_tokens struct containing the command
+ * line
+ * @param[out] pid A pointer pointing to the pid
+ * @param[out] jid A pointer pointing to the jid
+ *
+ * @return -1 if the job was not found or input was not correct
+ * @return 0 if the pid and jid were successfully found
+ *
+ */
+int cmdline_get_pid_jid(const struct cmdline_tokens *token, pid_t *pid,
+                        jid_t *jid) {
+
+    const int job_index = 1;  // index of the job in argv
+    const int jid_offset = 1; // index of the start of the jid after the prefix
+    const char jid_prefix = '%';    // the prefix denoting that a jid was passed
+    const int jid_prefix_index = 0; /* index of the start of the
+                                       pid after the prefix */
+
+    enum { JOB_NOT_FOUND = -1 };
+
+    char *job_arg = token->argv[job_index];
+
+    // jid was passed on the cmdline
+    if (job_arg[jid_prefix_index] == jid_prefix) {
+
+        // ensure the jid is numeric
+        if (!isdigit(job_arg[jid_offset])) {
+            sio_eprintf("%s: argument must be a PID or %%jobid\n",
+                        token->argv[0]);
+            return ERROR;
+        }
+
+        // get jid and pid
+        *jid = atoi(job_arg + jid_offset);
+        if (job_exists(*jid)) {
+            *pid = job_get_pid(*jid);
+
+        } else { // job not in job list
+            *pid = JOB_NOT_FOUND;
+        }
+    }
+
+    // pid was passed on the cmdline
+    else {
+        // ensure the pid is numeric
+        if (!isdigit(job_arg[0])) {
+            sio_eprintf("%s: argument must be a PID or %%jobid\n",
+                        token->argv[0]);
+            return ERROR;
+        }
+
+        // parse pid and jid
+        *pid = atoi(job_arg);
+        *jid = job_from_pid(*pid);
+    }
+    return SUCCESS;
+}
+
+/**
+ * @brief resets the state of a job after the job has started executing
+ *
+ * Parses the cmd line for the job. Then determines whether the job is a jid or
+ * pid. A jid is prefaced with a '%' on the cmd line. A pid is just a number.
+ * Then determines the other id from the id that was passed on the cmd line. The
+ * job state is updated in the job list. If the specified job became a
+ * foreground job, the function waits for it to terminate before returning.
+ *
+ * @param[in] tokens A pointer to a cmdline_tokens struct containing the cmd
+ * line args
+ * @param[in] state The state that the job is changing to
+ *
+ */
 void switch_state(const struct cmdline_tokens *token, job_state state) {
     sigset_t full_mask, prev_mask;
 
-    const int job_index = 1;
-    const int argv_min_length = job_index + 1;
-    const int jid_offset = 1;
-    const char jid_prefix = '%';
-    const int jid_prefix_index = 0;
+    const int job_index = 1;                   // index of the job in argv
+    const int argv_min_length = job_index + 1; // minimum length of argv
+                                               // if it contains a pid or jid
 
     jid_t jid;
     pid_t pid;
@@ -236,69 +336,57 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
     sigfillset(&full_mask);
     sigemptyset(&prev_mask);
 
-    // block sigs
+    // block signals before accessing job list
     sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
 
+    // cmdline does not have state and job based on length of argv
     if (token->argc < argv_min_length) {
         sio_eprintf("%s command requires PID or %%jobid argument\n",
                     token->argv[0]);
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         return;
-    } else {
+    }
 
+    // command line has minimum number arguments to contain state and job
+    else {
         char *job_arg = token->argv[job_index];
 
-        // get jid and pid based on cmdline input
-        if (job_arg[jid_prefix_index] == jid_prefix) {
-
-            // ensure the jid is numeric
-            if (!isdigit(job_arg[jid_offset])) {
-                sio_eprintf("%s: argument must be a PID or %%jobid\n",
-                            token->argv[0]);
-                sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-                return;
-            }
-
-            jid = atoi(job_arg + jid_offset);
-            if (job_exists(jid)) {
-                pid = job_get_pid(jid);
-            } else {
-                pid = -1;
-            }
-        } else {
-
-            // ensure the pid is numeric
-            if (!isdigit(job_arg[0])) {
-                sio_eprintf("%s: argument must be a PID or %%jobid\n",
-                            token->argv[0]);
-                sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-                return;
-            }
-            pid = atoi(job_arg);
-            jid = job_from_pid(pid);
+        // parse job (pid and jid) from cmdline
+        if (cmdline_get_pid_jid(token, &pid, &jid) == ERROR) {
+            sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+            return;
         }
 
-        // ensure job exists
+        // job exists
         if (job_exists(jid)) {
             if (job_get_state(jid) == ST) {
                 int neg_pid = 0 - pid;
 
                 // pid is negated because we want SIGCONT to be sent to every
-                // process in the pg
+                // process in the process group
                 kill(neg_pid, SIGCONT);
             }
-            job_set_state(jid, state);
 
-        } else {
+            // set the state of the job to the new state
+            job_set_state(jid, state);
+        }
+
+        // job doesn't exist
+        else {
             sio_eprintf("%s: No such job\n", job_arg);
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             return;
         }
 
+        // wait for foreground processs to terminate if the specified job was
+        // changed to a fg job
         if (fg_job() != NO_FG_PROCESS) {
             sio_assert(!sigismember(&prev_mask, SIGCHLD));
             wait_fg(jid, pid, prev_mask);
-        } else {
+        }
+
+        // specified job was not a fg job so print joblist entry
+        else {
             sio_printf("[%d] (%d) %s\n", jid, pid, job_get_cmdline(jid));
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
@@ -307,38 +395,58 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
 }
 
 /**
- * @brief <What does eval do?>
+ * @brief Evaluates built in commands: quit, job, bg, and fg
  *
- * TODO: Delete this comment and replace it with your own.
+ * quit: quits the shell
+ * job: prints out the job list
+ * fg: switches the state of a job to the foreground
+ * bg: switches the state of a job to the background
  *
- * NOTE: The shell is supposed to be a long-running process, so this
- * function (and its helpers) should avoid exiting on error.  This is not to
- * say they shouldn't detect and print (or otherwise handle) errors!
+ * @param[in] token A pointer to a cmdline_tokens struct
+ *                  containing the builtin type
+ *
  */
 void eval_builtin_command(const struct cmdline_tokens *token) {
     dbg_requires(token->builtin);
     switch (token->builtin) {
+
     case BUILTIN_NONE:
-        return;
+        break;
+
     case BUILTIN_QUIT:
-        // exit the shell
         exit(EXIT_SUCCESS);
+
     case BUILTIN_JOBS:
         output_job_list(token);
-        return;
+        break;
+
     case BUILTIN_BG:
         switch_state(token, BG);
-        return;
+        break;
+
     case BUILTIN_FG:
         switch_state(token, FG);
-        return;
+        break;
     }
 }
 
+/**
+ * @brief Redirects infile to STDIN and STDOUT to outfile if specified on the
+ * command line
+ *
+ * If outfile does not exist, it is created. If outfile exists it is truncated
+ * so that the file is entirely overwritten
+ *
+ * @param[in] token  A pointer to a cmdline_tokens struct containing the paths
+ * of the infile and the outfile
+ *
+ */
 void redirect_IO(const struct cmdline_tokens *token) {
+
     int fd_infile, fd_outfile;
     bool open_error = false;
 
+    // redirect infile to STDIN
     if (token->infile != NULL) {
         if ((fd_infile = open(token->infile, O_RDONLY)) < 0) {
             perror(token->infile);
@@ -355,8 +463,12 @@ void redirect_IO(const struct cmdline_tokens *token) {
         }
     }
 
+    // redirect outfile to STDOUT
     open_error = false;
     if (token->outfile != NULL) {
+
+        // if outfile doesn't exist, it is created
+        // if outfile exists it is truncated so it is entirely overwritten
         if ((fd_outfile = open(token->outfile, O_CREAT | O_WRONLY | O_TRUNC,
                                DEF_MODE)) < 0) {
             perror(token->outfile);
@@ -377,6 +489,8 @@ void redirect_IO(const struct cmdline_tokens *token) {
 /** @brief gets the state of a job after parsing the command line
  *
  * @param[in] parse_result The enum returned after parsing the command line
+ *
+ * @return the state of the job as a job_state enum
  */
 job_state state_from_parseline(parseline_return parse_result) {
     job_state process_state = UNDEF;
@@ -393,10 +507,20 @@ job_state state_from_parseline(parseline_return parse_result) {
 /**
  * @brief parses and runs the command line
  *
- * TODO: Delete this comment and replace it with your own.
+ * Parses the cmdline. Built in processes are executed by the parent. If the job
+ * is not a builtin, the parent is forked and the job is added to the job list
+ * and executed by the child. If the job is a foreground process, the eval
+ * function waits for the child to terminate and be reaped before resuming
+ * execution.
+ *
+ * If an input file is specified, the file is opened and stdin is redirected to
+ * point to the file contents.
+ *
+ * If an output file is specified, the file is opened and truncated or created
+ * and stdout is redirected to point to the file contents
  *
  * @param[in] cmdline The string passed into the command line
- * 
+ *
  */
 void eval(const char *cmdline) {
 
@@ -440,7 +564,7 @@ void eval(const char *cmdline) {
         pid = fork();
         setpgid(0, 0);
 
-        if (pid == syscall_error) {
+        if (pid == ERROR) {
             perror("fork error.");
         } else if (pid == CHILD_PROCESS) {
 
@@ -474,10 +598,11 @@ void eval(const char *cmdline) {
             }
             exit(EXIT_FAILURE);
         }
+
         /* Parent waits for foreground job to terminate if there is one*/
         if (fg_job() != NO_FG_PROCESS) {
             wait_fg(jid, pid, prev_mask);
-        } else {
+        } else { // print job list entry
             sio_printf("[%d] (%d) %s\n", jid, pid, cmdline);
         }
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
@@ -586,7 +711,7 @@ void sigchld_handler(int sig) {
     }
 
     // check for errors with waitpid
-    if (pid == syscall_error && errno != ECHILD) {
+    if (pid == ERROR && errno != ECHILD) {
         perror("waitpid error. Sigchld handler");
     }
 
@@ -649,7 +774,7 @@ void sigint_sigtstp_handler(int sig, char *signal) {
 
         // we are passing in negpid so that kill will send the specified signal
         // to every process in the same process group as pid
-        if (kill(neg_pid, sig) == syscall_error) {
+        if (kill(neg_pid, sig) == ERROR) {
             perror("kill() error.");
         }
 
