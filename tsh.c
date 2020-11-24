@@ -54,7 +54,6 @@ void sigquit_handler(int sig);
 void cleanup(void);
 
 typedef enum fork_return {
-    FORK_ERROR = -1,
     CHILD_PROCESS = 0,
 } fork_return;
 
@@ -336,7 +335,7 @@ void eval_builtin_command(const struct cmdline_tokens *token) {
     }
 }
 
-void redirect_input(const struct cmdline_tokens *token) {
+void redirect_IO(const struct cmdline_tokens *token) {
     int fd_infile, fd_outfile;
     bool open_error = false;
 
@@ -375,41 +374,11 @@ void redirect_input(const struct cmdline_tokens *token) {
     }
 }
 
-/**
- * @brief <What does eval do?>
+/** @brief gets the state of a job after parsing the command line
  *
- * TODO: Delete this comment and replace it with your own.
- *
- * NOTE: The shell is supposed to be a long-running process, so this function
- *       (and its helpers) should avoid exiting on error.  This is not to say
- *       they shouldn't detect and print (or otherwise handle) errors!
+ * @param[in] parse_result The enum returned after parsing the command line
  */
-void eval(const char *cmdline) {
-    parseline_return parse_result;
-    struct cmdline_tokens token;
-    pid_t pid;
-    jid_t jid;
-    sigset_t full_mask, sigchld_full_mask, prev_mask;
-
-    sigemptyset(&full_mask);
-    sigemptyset(&sigchld_full_mask);
-
-    // initialize masks
-    sigfillset(&full_mask);
-    sigaddset(&sigchld_full_mask, SIGCHLD);
-    sigaddset(&sigchld_full_mask, SIGINT);
-    sigaddset(&sigchld_full_mask, SIGTSTP);
-    sigemptyset(&prev_mask);
-
-    // Parse command line
-    parse_result = parseline(cmdline, &token);
-
-    // ignore empty lines and parse errors
-    if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
-        exit(EXIT_FAILURE);
-    }
-
-    /** TODO: make helper */
+job_state state_from_parseline(parseline_return parse_result) {
     job_state process_state = UNDEF;
     if (parse_result == PARSELINE_BG) {
         process_state = BG;
@@ -418,29 +387,77 @@ void eval(const char *cmdline) {
     } else {
         exit(EXIT_FAILURE);
     }
+    return process_state;
+}
+
+/**
+ * @brief parses and runs the command line
+ *
+ * TODO: Delete this comment and replace it with your own.
+ *
+ * @param[in] cmdline The string passed into the command line
+ * 
+ */
+void eval(const char *cmdline) {
+
+    parseline_return parse_result;
+    struct cmdline_tokens token;
+    pid_t pid;
+    jid_t jid;
+    sigset_t full_mask, sigchld_sigint_sigtstp_mask, prev_mask;
+    char **argv;
+
+    // initialize masks
+    sigemptyset(&full_mask);
+    sigemptyset(&sigchld_sigint_sigtstp_mask);
+    sigemptyset(&prev_mask);
+    sigfillset(&full_mask);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGCHLD);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGINT);
+    sigaddset(&sigchld_sigint_sigtstp_mask, SIGTSTP);
+
+    parse_result = parseline(cmdline, &token);
+
+    if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
+        exit(EXIT_FAILURE);
+    }
+
+    // get job state from parse_result
+    job_state process_state = UNDEF;
+    process_state = state_from_parseline(parse_result);
 
     if (token.builtin != BUILTIN_NONE) {
         eval_builtin_command(&token);
     } else {
-        sigprocmask(SIG_BLOCK, &sigchld_full_mask, &prev_mask);
-        char **argv = token.argv;
+        argv = token.argv;
+
+        // block signals to prevent the child terminating before the parent can
+        // add the child to the job list
+        sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, &prev_mask);
+
+        // create child process and place all children in their own
+        // process group
         pid = fork();
-        setpgid(0, 0); /** TODO: this seems incorrect */
+        setpgid(0, 0);
 
-        if (pid == FORK_ERROR) {
+        if (pid == syscall_error) {
             perror("fork error.");
-        } else if (pid == CHILD_PROCESS) { // child runs job
-            // redirect infile to STDIN
-            redirect_input(&token);
+        } else if (pid == CHILD_PROCESS) {
 
+            // redirect infile to STDIN and outfile to STDOUT
+            redirect_IO(&token);
+
+            // unblock signals before execve so child does not inherit masks
+            // from parent
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
+            // execute child process
             if (execve(argv[0], argv, environ) < 0) {
                 if (access(argv[0], R_OK) < 0) {
                     perror(argv[0]);
                 }
                 exit(EXIT_FAILURE);
             }
-            sigprocmask(SIG_BLOCK, &sigchld_full_mask, NULL);
         }
 
         if (process_state != UNDEF) {
@@ -467,20 +484,34 @@ void eval(const char *cmdline) {
     }
 }
 
-void print_job_interupt(int status, jid_t jid, pid_t pid) {
+/**
+ * @brief prints the status of each child reaped or stopped by wait pid
+ *
+ * @param[in] status Integer represenation of the status returned by waitpid
+ * @param[in] jid  Job ID of the job
+ * @param[in] pid  process group id of the job
+ *
+ */
+void print_sigchld_status(int status, jid_t jid, pid_t pid) {
+
+    // if job terminated normally, only print if verbose mode is specified
     if (verbose && WIFEXITED(status)) {
 
         sio_printf("sigchld_handler: Job [%d] (%d) deleted\n", jid, pid);
         sio_printf("sigchld_handler: Job [%d] (%d) terminated "
                    "normally (status %d)\n",
                    jid, pid, WEXITSTATUS(status));
+    }
 
-    } else if (WIFSIGNALED(status)) {
+    // job was terminated by signal
+    else if (WIFSIGNALED(status)) {
 
         sio_printf("Job [%d] (%d) terminated by signal %d\n", jid, pid,
                    WTERMSIG(status));
+    }
 
-    } else if (WIFSTOPPED(status)) {
+    // job was stopped by signal
+    else if (WIFSTOPPED(status)) {
 
         sio_printf("Job [%d] (%d) stopped by signal %d\n", jid, pid,
                    WSTOPSIG(status));
@@ -538,18 +569,18 @@ void sigchld_handler(int sig) {
         jid = job_from_pid(pid);
         if (job_exists(jid)) {
 
-            // job is terminated normally or by signal
+            // job terminated normally or by signal
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
 
                 delete_job(jid);
-                print_job_interupt(status, jid, pid);
+                print_sigchld_status(status, jid, pid);
             }
 
-            // job is stopped by signal
+            // job stopped by signal
             else if (WIFSTOPPED(status)) {
 
                 job_set_state(jid, ST);
-                print_job_interupt(status, jid, pid);
+                print_sigchld_status(status, jid, pid);
             }
         }
     }
@@ -638,6 +669,8 @@ void sigint_sigtstp_handler(int sig, char *signal) {
  * @brief Wrapper function for sigint_sigtstp_handler in order to pass string
  * representation of SIGINT signal for debugging purposes
  *
+ * called when there is a interrupt command from the keyboard
+ *
  * @param[in] sig ID of SIGINT signal
  * @remark saves and restores errno
  */
@@ -661,7 +694,9 @@ void sigint_handler(int sig) {
 
 /**
  * @brief Wrapper function for sigint_sigtstp_handler in order to pass string
- * representation of SIGTSTP signal for debugging purposes
+ * representation of SIGTSTP signal for debugging purposes.
+ *
+ * called when there is a stop command from the keyboard
  *
  * @param[in] sig ID of SIGTSTP signal
  * @remark saves and restores errno
