@@ -58,7 +58,7 @@ typedef enum fork_return {
     CHILD_PROCESS = 0,
 } fork_return;
 
-typedef enum waitpid_return { WAITPID_ERROR = -1 } waitpid_return;
+typedef enum syscall_return { syscall_error = -1 } syscall_return;
 typedef enum fgjob_return { NO_FG_PROCESS = 0 } fgjob_return;
 
 /**
@@ -291,7 +291,7 @@ void switch_state(const struct cmdline_tokens *token, job_state state) {
             job_set_state(jid, state);
 
         } else {
-            sio_eprintf("%s: No such job or process id\n", job_arg);
+            sio_eprintf("%s: No such job\n", job_arg);
             sigprocmask(SIG_SETMASK, &prev_mask, NULL);
             return;
         }
@@ -510,6 +510,7 @@ void print_job_interupt(int status, jid_t jid, pid_t pid) {
  * @param[in] sig - The signal that is being passed into the signal handler
  *
  * @remark all signals are blocked inside handler
+ * @remark saves and restores errno
  */
 void sigchld_handler(int sig) {
 
@@ -553,7 +554,8 @@ void sigchld_handler(int sig) {
         }
     }
 
-    if (pid < 0 && errno != ECHILD) {
+    // check for errors with waitpid
+    if (pid == syscall_error && errno != ECHILD) {
         perror("waitpid error. Sigchld handler");
     }
 
@@ -568,32 +570,57 @@ void sigchld_handler(int sig) {
 }
 
 /**
- * @brief <What does sigchld_handler do?>
+ * @brief Sends SIGINT or SIGTSTP signal to all processes in the forground
+ * process when there is an interupt or stop command from the keyboard.
  *
- * TODO: Delete this comment and replace it with your own.
+ * The handler for both of these signals is basically the same. The only
+ * difference is the signal that is being sent to the child processes in the
+ * foreground process group. When an interupt is recieved a SIGINT is sent to
+ * the child processes and when a stop is received a SIGTSTP is sent to the
+ * child processes in the fg process group using kill().
+ *
+ * @param[in] sig  The numerical number of the signal being handled
+ * @param[in] signal  String represenation of the signal being handled for
+ * debugging messages
+ *
+ * @pre sig is SIGINT or SIGTSTP
+ * @remark All signals are blocked inside of the handler
+ * @remark saves and restores errno
+ *
  */
 void sigint_sigtstp_handler(int sig, char *signal) {
+
+    sigset_t full_mask, prev_mask;
+    jid_t jid;
+    pid_t pid, neg_pid;
+
+    // save errno to restore on exit
+    int olderrno = errno;
 
     // This handler should only process SIGING and SIGTSTP signals
     sio_assert(sig == SIGINT || sig == SIGTSTP);
 
-    // initialize masks
-    sigset_t full_mask, prev_mask;
+    // initialize blocking masks
     sigemptyset(&full_mask);
     sigfillset(&full_mask);
     sigemptyset(&prev_mask);
 
-    // block signals before manpulating/accessing the job list
+    // block all signals before manpulating/accessing the job list
     sigprocmask(SIG_BLOCK, &full_mask, &prev_mask);
-    jid_t jid = fg_job();
 
-    if (jid != NO_FG_PROCESS) {
-        pid_t pid = job_get_pid(jid);
-        pid_t neg_pid = 0 - pid;
+    // ensure there is a foreground job and it has not terminated
+    jid = fg_job();
+    if (job_exists(jid)) {
 
-        // we are passing in so that kill will send a signal to every
-        // process in the pid process group
-        kill(neg_pid, sig);
+        // get foreground process process group
+        pid = job_get_pid(jid);
+        neg_pid = 0 - pid;
+
+        // we are passing in negpid so that kill will send the specified signal
+        // to every process in the same process group as pid
+        if (kill(neg_pid, sig) == syscall_error) {
+            perror("kill() error.");
+        }
 
         if (verbose)
             sio_printf("%s_handler: Sent %s to Job [%d] (%d) \n", signal,
@@ -602,39 +629,58 @@ void sigint_sigtstp_handler(int sig, char *signal) {
 
     // restore masks before exiting
     sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-}
 
-/**
- * @brief <What does sigint_handler do?>
- *
- * TODO: Delete this comment and replace it with your own.
- */
-void sigint_handler(int sig) {
-    int olderrno = errno;
-    if (verbose)
-        sio_printf("sigint_handler: entering\n");
-
-    sigint_sigtstp_handler(sig, "sigint");
-
-    if (verbose)
-        sio_printf("sigint_handler: Exiting\n");
+    // save errno to restore on exit
     errno = olderrno;
 }
 
 /**
- * @brief <What does sigtstp_handler do?>
+ * @brief Wrapper function for sigint_sigtstp_handler in order to pass string
+ * representation of SIGINT signal for debugging purposes
  *
- * TODO: Delete this comment and replace it with your own.
+ * @param[in] sig ID of SIGINT signal
+ * @remark saves and restores errno
+ */
+void sigint_handler(int sig) {
+
+    // save errno
+    int olderrno = errno;
+
+    if (verbose)
+        sio_printf("sigint_handler: entering\n");
+
+    // call handler
+    sigint_sigtstp_handler(sig, "sigint");
+
+    if (verbose)
+        sio_printf("sigint_handler: Exiting\n");
+
+    // restore errno
+    errno = olderrno;
+}
+
+/**
+ * @brief Wrapper function for sigint_sigtstp_handler in order to pass string
+ * representation of SIGTSTP signal for debugging purposes
+ *
+ * @param[in] sig ID of SIGTSTP signal
+ * @remark saves and restores errno
  */
 void sigtstp_handler(int sig) {
+
+    // save errno to restore on exit
     int olderrno = errno;
+
     if (verbose)
         sio_printf("sigtstp_handler: entering\n");
 
+    // call real handler
     sigint_sigtstp_handler(sig, "sigtstp");
 
     if (verbose)
         sio_printf("sigtstp_handler: Exiting\n");
+
+    // restore old errno
     errno = olderrno;
 }
 
