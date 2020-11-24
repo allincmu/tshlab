@@ -2,14 +2,50 @@
  * @file tsh.c
  * @brief A tiny shell program with job control
  *
- * TODO: Delete this comment and replace it with your own.
- * <The line above is not a sufficient documentation.
- *  You will need to write your program documentation.
- *  Follow the 15-213/18-213/15-513 style guide at
- *  http://www.cs.cmu.edu/~213/codeStyle.html.>
+ * This sell is a command line interpreter that runs programs. The shell prints
+ * a prompt and waits for a command line from the user. Then carries out the
+ * action specified by the command line.
  *
- * @author Your Name <andrewid@andrew.cmu.edu>
- * TODO: Include your name and Andrew ID here.
+ * The command line contains one or more words. The first one is the name of the
+ * action that the shell should perform. This can be the path to a program or a
+ * built in command. The words following are the arguments to be passed into the
+ * command.
+ *
+ * Built in processes implemented by the shell
+ *      quit        : quits the shell
+ *      job         : prints out the job list
+ *      fg (job)    : switches the state of a job to the foreground
+ *      bg (job)    : switches the state of a job to the background
+ *
+ * For fg and bg, job can be either the job id (jid) or the process id (pid) of
+ * the job. The job id is passed with an '%' to indicate that the job identifier
+ * is a job id not a process id.
+ *
+ * The job ids and process ids of each job is specified in it's
+ * job list entry which is formatted as follows:
+ *
+ *              [jid] (pid) command_line
+ *
+ * This shell supports forground and background processes. Background processes
+ * are specified by terminating the command line with an '&'. To run a
+ * foreground process, the command line is not terminated with a special
+ * character. The shell waits for foreground processes to terminate and be
+ * reaped by the SIGCHLD handler using sigsuspend and waitpid before resuming
+ * execution and printing the next shell prompt.
+ *
+ * This shell implements 3 handlers:
+ *      sigint  Handles Ctrl-C
+ *      sigtstp Handles Ctrl-Z
+ *      sigchld Handles stopped or terminated child processes
+ *
+ *
+ * IO Redirection
+ * The shell can read input from a file using the '< input file' after the
+ * command. It redirects stdin to the input file. The shell can redirect output
+ * to a file using the '> input file' after the command. It redirects stdout to
+ * the output file.
+ *
+ * @author Austin Lin <andrewid@andrew.cmu.edu>
  */
 
 #include "csapp.h"
@@ -559,8 +595,8 @@ void eval(const char *cmdline) {
         // add the child to the job list
         sigprocmask(SIG_BLOCK, &sigchld_sigint_sigtstp_mask, &prev_mask);
 
-        // create child process and place all children in their own
-        // process group
+        // create child process and place all children in their a new
+        // process group separate from the shell
         pid = fork();
         setpgid(0, 0);
 
