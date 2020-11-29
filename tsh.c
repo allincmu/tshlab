@@ -2,7 +2,7 @@
  * @file tsh.c
  * @brief A tiny shell program with job control
  *
- * This sell is a command line interpreter that runs programs. The shell prints
+ * This shell is a command line interpreter that runs programs. The shell prints
  * a prompt and waits for a command line from the user. Then carries out the
  * action specified by the command line.
  *
@@ -45,7 +45,7 @@
  * to a file using the '> input file' after the command. It redirects stdout to
  * the output file.
  *
- * @author Austin Lin <andrewid@andrew.cmu.edu>
+ * @author Austin Lin <allin@andrew.cmu.edu>
  */
 
 #include "csapp.h"
